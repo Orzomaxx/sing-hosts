@@ -1,0 +1,92 @@
+name: Release
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64)        ARCH='amd64' ;;
+            x86|i686|i386) ARCH='386' ;;
+            aarch64|arm64) ARCH='arm64' ;;
+            armv7l)        ARCH='armv7' ;;
+            *) echo 'Unsupported architecture'; exit 1 ;;
+          esac
+
+          if [[ ! -f sing-box.deb ]]; then
+            VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep tag_name | cut -d ":" -f2 | sed 's/\"//g;s/\,//g;s/\ //g;s/v//')
+            # VERSION="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases | jq "map(select(.release | not)) | .[0].assets[] | select (.name == 'sing-box_${VERSION}_linux_${ARCH}.deb') | .url")"
+            curl -fsSL -o sing-box.deb "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box_${VERSION}_linux_${ARCH}.deb"
+          fi
+          sudo apt install -y ./sing-box.deb
+
+      - name: Make rule-set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rule-set
+          cd rule-set
+
+          HOSTS_FILENAME='hosts_mail_fb'
+          args=(-w '%header{last-modified}')
+
+          # Restore lastmod (if any)
+          if [[ -f last-modified.txt ]]; then
+            args+=(--header "If-Modified-Since: $(cat last-modified.txt)")
+          fi
+
+          # Download hosts file if needed
+          LAST_MODIFIED="$(curl -fsSL -O "${args[@]}" "https://schakal.ru/hosts/${HOSTS_FILENAME}.txt")"
+
+          # Check 304 response
+          [[ -f "${HOSTS_FILENAME}.txt" ]] || exit 0
+
+          # Save lastmod
+          echo "$LAST_MODIFIED" > last-modified.txt
+
+          # Convert
+          sing-box rule-set convert --type adguard "${HOSTS_FILENAME}.txt"
+
+      - name: Cache last modified time
+        uses: actions/cache@v3
+        with:
+          path: rule-set/last-modified.txt
+          key: sha-${{ github.ref }}
+
+      - name: Release rule sets
+        if: steps.build.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rule-set
+          cd rule-set
+
+          HOSTS_FILENAME='hosts_mail_fb'
+
+          if [[ -f "${HOSTS_FILENAME}.srs" ]]; then
+            git init
+            git config --local user.email "github-action@users.noreply.github.com"
+            git config --local user.name "GitHub Action"
+            git remote add origin "https://github-action:${GITHUB_TOKEN}@github.com/${{github.repository}}.git"
+            git branch -M rule-set
+
+            git add *.srs
+            git commit -m "Update rule-set"
+            git push -f origin rule-set
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
